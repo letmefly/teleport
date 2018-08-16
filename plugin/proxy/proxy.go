@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package plugin
+package proxy
 
 import (
 	"github.com/henrylee2cn/goutil"
@@ -20,42 +20,42 @@ import (
 	"github.com/henrylee2cn/teleport/socket"
 )
 
-// A proxy plugin for handling unknown pulling or pushing.
+// A proxy plugin for handling unknown calling or pushing.
 
-// Proxy creates a proxy plugin for handling unknown pulling and pushing.
-func Proxy(fn func(*ProxyLabel) Caller) tp.Plugin {
+// Proxy creates a proxy plugin for handling unknown calling and pushing.
+func Proxy(fn func(*ProxyLabel) Forwarder) tp.Plugin {
 	return &proxy{
-		pullCaller: func(label *ProxyLabel) PullCaller {
+		callForwarder: func(label *ProxyLabel) CallForwarder {
 			return fn(label)
 		},
-		pushCaller: func(label *ProxyLabel) PushCaller {
+		pushForwarder: func(label *ProxyLabel) PushForwarder {
 			return fn(label)
 		},
 	}
 }
 
-// ProxyPull creates a proxy plugin for handling unknown pulling.
-func ProxyPull(fn func(*ProxyLabel) PullCaller) tp.Plugin {
-	return &proxy{pullCaller: fn}
+// ProxyCall creates a proxy plugin for handling unknown calling.
+func ProxyCall(fn func(*ProxyLabel) CallForwarder) tp.Plugin {
+	return &proxy{callForwarder: fn}
 }
 
 // ProxyPush creates a proxy plugin for handling unknown pushing.
-func ProxyPush(fn func(*ProxyLabel) PushCaller) tp.Plugin {
-	return &proxy{pushCaller: fn}
+func ProxyPush(fn func(*ProxyLabel) PushForwarder) tp.Plugin {
+	return &proxy{pushForwarder: fn}
 }
 
 type (
-	// Caller the object used to pull and push
-	Caller interface {
-		PullCaller
-		PushCaller
+	// Forwarder the object used to call and push
+	Forwarder interface {
+		CallForwarder
+		PushForwarder
 	}
-	// PullCaller the object used to pull
-	PullCaller interface {
-		Pull(uri string, arg interface{}, result interface{}, setting ...socket.PacketSetting) tp.PullCmd
+	// CallForwarder the object used to call
+	CallForwarder interface {
+		Call(uri string, arg interface{}, result interface{}, setting ...socket.PacketSetting) tp.CallCmd
 	}
-	// PushCaller the object used to push
-	PushCaller interface {
+	// PushForwarder the object used to push
+	PushForwarder interface {
 		Push(uri string, arg interface{}, setting ...socket.PacketSetting) *tp.Rerror
 	}
 	// ProxyLabel proxy label information
@@ -63,8 +63,8 @@ type (
 		SessionId, RealIp, Uri string
 	}
 	proxy struct {
-		pullCaller func(*ProxyLabel) PullCaller
-		pushCaller func(*ProxyLabel) PushCaller
+		callForwarder func(*ProxyLabel) CallForwarder
+		pushForwarder func(*ProxyLabel) PushForwarder
 	}
 )
 
@@ -77,16 +77,16 @@ func (p *proxy) Name() string {
 }
 
 func (p *proxy) PostNewPeer(peer tp.EarlyPeer) error {
-	if p.pullCaller != nil {
-		peer.SetUnknownPull(p.pull)
+	if p.callForwarder != nil {
+		peer.SetUnknownCall(p.call)
 	}
-	if p.pushCaller != nil {
+	if p.pushForwarder != nil {
 		peer.SetUnknownPush(p.push)
 	}
 	return nil
 }
 
-func (p *proxy) pull(ctx tp.UnknownPullCtx) (interface{}, *tp.Rerror) {
+func (p *proxy) call(ctx tp.UnknownCallCtx) (interface{}, *tp.Rerror) {
 	var (
 		label    ProxyLabel
 		settings = make([]socket.PacketSetting, 1, 8)
@@ -107,11 +107,11 @@ func (p *proxy) pull(ctx tp.UnknownPullCtx) (interface{}, *tp.Rerror) {
 		label.RealIp = goutil.BytesToString(realIpBytes)
 	}
 	label.Uri = ctx.Uri()
-	pullcmd := p.pullCaller(&label).Pull(label.Uri, ctx.InputBodyBytes(), &result, settings...)
-	pullcmd.InputMeta().VisitAll(func(key, value []byte) {
+	callcmd := p.callForwarder(&label).Call(label.Uri, ctx.InputBodyBytes(), &result, settings...)
+	callcmd.InputMeta().VisitAll(func(key, value []byte) {
 		ctx.SetMeta(goutil.BytesToString(key), goutil.BytesToString(value))
 	})
-	rerr := pullcmd.Rerror()
+	rerr := callcmd.Rerror()
 	if rerr != nil && rerr.Code < 200 && rerr.Code > 99 {
 		rerr.Code = tp.CodeBadGateway
 		rerr.Message = tp.CodeText(tp.CodeBadGateway)
@@ -136,7 +136,7 @@ func (p *proxy) push(ctx tp.UnknownPushCtx) *tp.Rerror {
 		label.RealIp = goutil.BytesToString(realIpBytes)
 	}
 	label.Uri = ctx.Uri()
-	rerr := p.pushCaller(&label).Push(label.Uri, ctx.InputBodyBytes(), settings...)
+	rerr := p.pushForwarder(&label).Push(label.Uri, ctx.InputBodyBytes(), settings...)
 	if rerr != nil && rerr.Code < 200 && rerr.Code > 99 {
 		rerr.Code = tp.CodeBadGateway
 		rerr.Message = tp.CodeText(tp.CodeBadGateway)

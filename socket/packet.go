@@ -35,7 +35,7 @@ type (
 	Packet struct {
 		// packet sequence
 		seq string
-		// packet type, such as PULL, PUSH, REPLY
+		// packet type, such as CALL, PUSH, REPLY
 		ptype byte
 		// URI string
 		uri string
@@ -70,7 +70,7 @@ type (
 		Seq() string
 		// SetSeq sets the packet sequence
 		SetSeq(string)
-		// Ptype returns the packet type, such as PULL, PUSH, REPLY
+		// Ptype returns the packet type, such as CALL, PUSH, REPLY
 		Ptype() byte
 		// Ptype sets the packet type
 		SetPtype(byte)
@@ -207,7 +207,7 @@ func (p *Packet) SetSeq(seq string) {
 	p.seq = seq
 }
 
-// Ptype returns the packet type, such as PULL, PUSH, REPLY
+// Ptype returns the packet type, such as CALL, PUSH, REPLY
 func (p *Packet) Ptype() byte {
 	return p.ptype
 }
@@ -475,9 +475,13 @@ func WithNewBody(newBodyFunc NewBodyFunc) PacketSetting {
 }
 
 // WithXferPipe sets transfer filter pipe.
+// NOTE:
+//  panic if the filterId is not registered
 func WithXferPipe(filterId ...byte) PacketSetting {
 	return func(p *Packet) {
-		p.xferPipe.Append(filterId...)
+		if err := p.xferPipe.Append(filterId...); err != nil {
+			panic(err)
+		}
 	}
 }
 

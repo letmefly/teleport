@@ -54,20 +54,20 @@ type (
 	// EarlyPeer the communication peer that has just been created
 	EarlyPeer interface {
 		BasePeer
-		// Router returns the root router of pull or push handlers.
+		// Router returns the root router of call or push handlers.
 		Router() *Router
 		// SubRoute adds handler group.
 		SubRoute(pathPrefix string, plugin ...Plugin) *SubRouter
-		// RoutePull registers PULL handlers, and returns the paths.
-		RoutePull(ctrlStruct interface{}, plugin ...Plugin) []string
-		// RoutePullFunc registers PULL handler, and returns the path.
-		RoutePullFunc(pullHandleFunc interface{}, plugin ...Plugin) string
+		// RouteCall registers CALL handlers, and returns the paths.
+		RouteCall(ctrlStruct interface{}, plugin ...Plugin) []string
+		// RouteCallFunc registers CALL handler, and returns the path.
+		RouteCallFunc(callHandleFunc interface{}, plugin ...Plugin) string
 		// RoutePush registers PUSH handlers, and returns the paths.
 		RoutePush(ctrlStruct interface{}, plugin ...Plugin) []string
 		// RoutePushFunc registers PUSH handler, and returns the path.
 		RoutePushFunc(pushHandleFunc interface{}, plugin ...Plugin) string
-		// SetUnknownPull sets the default handler, which is called when no handler for PULL is found.
-		SetUnknownPull(fn func(UnknownPullCtx) (interface{}, *Rerror), plugin ...Plugin)
+		// SetUnknownCall sets the default handler, which is called when no handler for CALL is found.
+		SetUnknownCall(fn func(UnknownCallCtx) (interface{}, *Rerror), plugin ...Plugin)
 		// SetUnknownPush sets the default handler, which is called when no handler for PUSH is found.
 		SetUnknownPush(fn func(UnknownPushCtx) *Rerror, plugin ...Plugin)
 	}
@@ -81,7 +81,9 @@ type (
 		// DialContext connects with the peer of the destination address, using the provided context.
 		DialContext(ctx context.Context, addr string, protoFunc ...socket.ProtoFunc) (Session, *Rerror)
 		// ServeConn serves the connection and returns a session.
-		// Note: Not support automatically redials after disconnection.
+		// Note:
+		//  Not support automatically redials after disconnection;
+		//  Execute the PostAcceptPlugin plugins.
 		ServeConn(conn net.Conn, protoFunc ...socket.ProtoFunc) (Session, error)
 		// ServeListener serves the listener.
 		// Note: The caller ensures that the listener supports graceful shutdown.
@@ -103,7 +105,7 @@ type peer struct {
 	freeContext       *handlerCtx
 	ctxLock           sync.Mutex
 	defaultSessionAge time.Duration // Default session max age, if less than or equal to 0, no time limit
-	defaultContextAge time.Duration // Default PULL or PUSH context max age, if less than or equal to 0, no time limit
+	defaultContextAge time.Duration // Default CALL or PUSH context max age, if less than or equal to 0, no time limit
 	tlsConfig         *tls.Config
 	slowCometDuration time.Duration
 	defaultBodyCodec  byte
@@ -309,13 +311,19 @@ func (p *peer) renewSessionForClient(sess *session, dialFunc func() (net.Conn, e
 }
 
 // ServeConn serves the connection and returns a session.
-// Note: Not support automatically redials after disconnection.
+// Note:
+//  Not support automatically redials after disconnection;
+//  Execute the PostAcceptPlugin plugins.
 func (p *peer) ServeConn(conn net.Conn, protoFunc ...socket.ProtoFunc) (Session, error) {
 	network := conn.LocalAddr().Network()
 	if strings.Contains(network, "udp") {
 		return nil, fmt.Errorf("invalid network: %s,\nrefer to the following: tcp, tcp4, tcp6, unix or unixpacket", network)
 	}
 	var sess = newSession(p, conn, protoFunc)
+	if rerr := p.pluginContainer.postAccept(sess); rerr != nil {
+		sess.Close()
+		return nil, rerr.ToError()
+	}
 	Tracef("serve ok (network:%s, addr:%s, id:%s)", network, sess.RemoteAddr().String(), sess.Id())
 	p.sessHub.Set(sess)
 	AnywayGo(sess.startReadAndHandle)
@@ -465,7 +473,7 @@ func (p *peer) putContext(ctx *handlerCtx, withWg bool) {
 	p.freeContext = ctx
 }
 
-// Router returns the root router of pull or push handlers.
+// Router returns the root router of call or push handlers.
 func (p *peer) Router() *Router {
 	return p.router
 }
@@ -475,14 +483,14 @@ func (p *peer) SubRoute(pathPrefix string, plugin ...Plugin) *SubRouter {
 	return p.router.SubRoute(pathPrefix, plugin...)
 }
 
-// RoutePull registers PULL handlers, and returns the paths.
-func (p *peer) RoutePull(pullCtrlStruct interface{}, plugin ...Plugin) []string {
-	return p.router.RoutePull(pullCtrlStruct, plugin...)
+// RouteCall registers CALL handlers, and returns the paths.
+func (p *peer) RouteCall(callCtrlStruct interface{}, plugin ...Plugin) []string {
+	return p.router.RouteCall(callCtrlStruct, plugin...)
 }
 
-// RoutePullFunc registers PULL handler, and returns the path.
-func (p *peer) RoutePullFunc(pullHandleFunc interface{}, plugin ...Plugin) string {
-	return p.router.RoutePullFunc(pullHandleFunc, plugin...)
+// RouteCallFunc registers CALL handler, and returns the path.
+func (p *peer) RouteCallFunc(callHandleFunc interface{}, plugin ...Plugin) string {
+	return p.router.RouteCallFunc(callHandleFunc, plugin...)
 }
 
 // RoutePush registers PUSH handlers, and returns the paths.
@@ -495,10 +503,10 @@ func (p *peer) RoutePushFunc(pushHandleFunc interface{}, plugin ...Plugin) strin
 	return p.router.RoutePushFunc(pushHandleFunc, plugin...)
 }
 
-// SetUnknownPull sets the default handler,
-// which is called when no handler for PULL is found.
-func (p *peer) SetUnknownPull(fn func(UnknownPullCtx) (interface{}, *Rerror), plugin ...Plugin) {
-	p.router.SetUnknownPull(fn, plugin...)
+// SetUnknownCall sets the default handler,
+// which is called when no handler for CALL is found.
+func (p *peer) SetUnknownCall(fn func(UnknownCallCtx) (interface{}, *Rerror), plugin ...Plugin) {
+	p.router.SetUnknownCall(fn, plugin...)
 }
 
 // SetUnknownPush sets the default handler,
@@ -509,8 +517,8 @@ func (p *peer) SetUnknownPush(fn func(UnknownPushCtx) *Rerror, plugin ...Plugin)
 
 // maybe useful
 
-func (p *peer) getPullHandler(uriPath string) (*Handler, bool) {
-	return p.router.subRouter.getPull(uriPath)
+func (p *peer) getCallHandler(uriPath string) (*Handler, bool) {
+	return p.router.subRouter.getCall(uriPath)
 }
 
 func (p *peer) getPushHandler(uriPath string) (*Handler, bool) {
